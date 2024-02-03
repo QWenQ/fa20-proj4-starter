@@ -61,32 +61,32 @@ int allocate_matrix(matrix **mat, int rows, int cols) {
     /* TODO: YOUR CODE HERE */
     // return -1 if rows or cols or both have invalid values
     if (rows < 1 || cols < 1) {
-        PyErr_SetString(NULL, "Invalid rows or cols!");
+        PyErr_SetString(PyExc_ValueError, "Invalid rows or cols!");
         return -1;
     }
 
     *mat = (matrix*)malloc(sizeof(matrix));
     if (*mat == NULL) {
-        PyErr_SetString(NULL, "Memory allocation for a matrix struct failed!");
+        PyErr_SetString(PyExc_ValueError, "Memory allocation for a matrix struct failed!");
         return -1;
     }
     // initialize all entries in the matrix struct
     (*mat)->rows = rows;
     (*mat)->cols = cols;
     (*mat)->is_1d = (rows == 1 || cols == 1) ? 1 : 0;
-    (*mat)->ref_cnt = 0;
+    (*mat)->ref_cnt = 1;
     (*mat)->parent = NULL;
     // initialize a double array
     (*mat)->data = (double**)malloc(sizeof(double*) * rows);
     if ((*mat)->data == NULL) {
-        PyErr_SetString(NULL, "Memory allocation for a double point array failed!");
+        PyErr_SetString(PyExc_ValueError, "Memory allocation for a double point array failed!");
         return -1;
     }
     for (int i = 0; i < rows; ++i) {
         // allocate memory and initialize it with zero
         (*mat)->data[i] = (double*)calloc(cols, sizeof(double)) ;
-        if (mat[i]->data == NULL) {
-            PyErr_SetString(NULL, "Memory allocation for a doule array failed!");
+        if ((*mat)->data[i] == NULL) {
+            PyErr_SetString(PyExc_ValueError, "Memory allocation for a doule array failed!");
             return -1;
         }
     }
@@ -103,17 +103,35 @@ int allocate_matrix(matrix **mat, int rows, int cols) {
 int allocate_matrix_ref(matrix **mat, matrix *from, int row_offset, int col_offset,
                         int rows, int cols) {
     /* TODO: YOUR CODE HERE */
-    int ret = allocate_matrix(mat, rows, cols);
-    if (ret == -1) {
-        PyErr_SetString(NULL, "Allocation memory for a matrix struct failed!");
+    *mat = (matrix*)malloc(sizeof(matrix));
+    if (*mat == NULL) {
+        PyErr_SetString(PyExc_ValueError, "Memory allocation for a matrix struct failed!");
         return -1;
     }
 
-    for (int i = 0; i < rows; ++i) {
-        for (int j = 0; j < cols; ++j) {
-            (*mat)->data[i][j] = from->data[i + row_offset][j + col_offset];
-        }
+    // initalization
+    (*mat)->data = &from->data[row_offset];
+    (*mat)->rows = rows;
+    (*mat)->cols = cols;
+    if (rows == 1 || cols == 1) {
+        (*mat)->is_1d = 1;
     }
+    else {
+        (*mat)->is_1d = 0;
+    }
+    (*mat)->ref_cnt = 0;
+    matrix* root = from;
+    while (root->parent) {
+        root = root->parent;
+    }
+
+    if (from->parent) {
+        (*mat)->parent = from->parent;
+    }
+    else {
+        (*mat)->parent = from;
+    }
+    ++(*mat)->parent->ref_cnt;
 
     return 0;
 }
@@ -127,17 +145,30 @@ int allocate_matrix_ref(matrix **mat, matrix *from, int row_offset, int col_offs
  */
 void deallocate_matrix(matrix *mat) {
     /* TODO: YOUR CODE HERE */
-    // decrease the reference count by 1
-    --mat->ref_cnt;
-    // free mat->data if no reference to it anymore
-    if (mat->ref_cnt <= 0) {
-        for (int i = 0; i < mat->rows; ++i) {
-            free(mat->data[i]);
-            mat->data[i] = NULL;
+    if (mat == NULL) {
+        return;
+    }
+
+    matrix* root = mat;
+    while (root->parent) {
+        root = root->parent;
+    }
+
+    --root->ref_cnt;
+    // free data array for no references
+    if (root->ref_cnt == 0) {
+        for (int i = 0; i < root->rows; ++i) {
+            free(root->data[i]);
+            root->data[i] = NULL;
         }
-        free(mat->data);
-        mat->data = NULL;
-        // bug: what about mat->parent? should be deallocate_matrix(mat->parent) called?
+        free(root->data);
+        root->data = NULL;
+        free(root);
+        root = NULL;
+    }
+
+    // free current mat if it is sub matrix
+    if (mat->parent != NULL) {
         free(mat);
         mat = NULL;
     }
@@ -167,7 +198,7 @@ void set(matrix *mat, int row, int col, double val) {
 void fill_matrix(matrix *mat, double val) {
     /* TODO: YOUR CODE HERE */
     for (int i = 0; i < mat->rows; ++i) {
-        for (int j = 0; j < mat->cols; ++i) {
+        for (int j = 0; j < mat->cols; ++j) {
             mat->data[i][j] = val;
         }
     }
@@ -213,6 +244,7 @@ int mul_matrix(matrix *result, matrix *mat1, matrix *mat2) {
     for (int i = 0; i < result->rows; ++i) {
         for (int j = 0; j < result->cols; ++j) {
             // data[i][j] = mat1[i][0] * mat2[0][j] + mat1[i][1] * mat2[1][j] + mat1[i][2] * mat2[2][j] + ... + mat[i][n - 1] * mat[n - 1][j]
+            // data[i][j] = sum(mat1[i][k] * mat2[k][j]), 0 <= k < rows(cols)
             double ans = 0.0;
             for (int k = 0; k < result->cols; ++k) {
                 ans += mat1->data[i][k] * mat2->data[k][j];
@@ -230,13 +262,32 @@ int mul_matrix(matrix *result, matrix *mat1, matrix *mat2) {
  */
 int pow_matrix(matrix *result, matrix *mat, int pow) {
     /* TODO: YOUR CODE HERE */
-    fill_matrix(result, 1.0);
+    matrix* tmp = NULL;
+    int ret = allocate_matrix(&tmp, result->rows, result->cols);
+    if (ret != 0) {
+        return ret;
+    }
+    // initialize TMP as E value
+    fill_matrix(tmp, 0.0);
+    for (int i = 0; i < tmp->rows; ++i) {
+        set(tmp, i, i, 1.0);
+    }
+
     for (int i = 0; i < pow; ++i) {
-        int ret = mul_matrix(result, result, mat);
+        ret = mul_matrix(result, tmp, mat);
         if (ret != 0) {
             return ret;
         }
+        // update TMP with RESULT
+        for (int j = 0; j < result->rows; ++j) {
+            for (int k = 0; k < result->cols; ++k) {
+                tmp->data[j][k] = result->data[j][k];
+            }
+        }
     }
+    // deallocate TMP
+    deallocate_matrix(tmp);
+    tmp = NULL;
     return 0;
 }
 
